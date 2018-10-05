@@ -1,24 +1,24 @@
-// #![feature(async_await)]
+#![feature(await_macro, async_await, futures_api)]
 
 use clap::{App, Arg};
 use console::style;
 // use indicatif::{ProgressBar, ProgressStyle};
-// use tokio::prelude::*;
-// use std::time::Duration;
-// use std::str;
 
-extern crate hyper;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde;
 extern crate serde_json;
 
-use hyper::rt::{self, Future, Stream};
+#[macro_use]
+extern crate tokio;
+
+use tokio::prelude::*;
 use hyper::Client;
 
 mod eosio;
 mod action;
 
+#[derive(Debug)]
 enum FetchError {
     Http(hyper::Error),
     Json(serde_json::Error),
@@ -34,19 +34,6 @@ impl From<serde_json::Error> for FetchError {
     fn from(err: serde_json::Error) -> FetchError {
         FetchError::Json(err)
     }
-}
-
-fn fetch_json(url: hyper::Uri) -> impl Future<Item = eosio::ChainInfo, Error = FetchError> {
-    let client = Client::new();
-    client
-        .get(url)
-        .and_then(|res| res.into_body().concat2())
-        .from_err::<FetchError>()
-        .and_then(|body| {
-            let chain_info = serde_json::from_slice(&body)?;
-            Ok(chain_info)
-        })
-        .from_err()
 }
 
 // fn create_progress_bar(quiet_mode: bool, msg: &str, length: Option<u64>) -> ProgressBar {
@@ -72,6 +59,22 @@ fn fetch_json(url: hyper::Uri) -> impl Future<Item = eosio::ChainInfo, Error = F
 //     bar
 // }
 
+async fn get_json<T>(url: String) -> Result<T, FetchError>
+where T: std::fmt::Debug,
+ T: serde::de::DeserializeOwned {
+    let client = Client::new();
+    let uri = url.parse().unwrap();
+    await!(
+        client.get(uri)
+            .and_then(|res| res.into_body().concat2())
+            .from_err()
+            .and_then(|body| {
+                let json = serde_json::from_slice::<T>(&body)?;
+                Ok(json)
+            })
+    )
+}
+
 fn main() {
     let matches =
         App::new("demux-rs")
@@ -91,19 +94,12 @@ fn main() {
         .unwrap_or("http://127.0.0.1:8888/v1");
     println!("Using api: {}", style(api).green());
 
-    let uri = (api.to_owned() + "/chain/get_info").parse().unwrap();
-    let f = fetch_json(uri)
-        .map(|chain_info: eosio::ChainInfo| {
-            println!("{:#?}", chain_info);
+    let url = api.to_owned() + "/chain/get_info";
 
-            let json = serde_json::to_string(&chain_info).unwrap();
-            println!("{}", json);
+    let chain = async {
+        let chain_info = await!(get_json::<eosio::ChainInfo>(url));
+        println!("{:#?}", chain_info);
+    };
 
-        })
-        .map_err(|e| match e {
-            FetchError::Http(e) => eprintln!("http error: {}", e),
-            FetchError::Json(e) => eprintln!("json parsing error: {}", e),
-        });
-
-    rt::run(f);
+    tokio::run_async(chain);
 }
